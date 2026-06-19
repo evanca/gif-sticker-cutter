@@ -520,7 +520,7 @@ function buildMaskCanvas() {
   const outputCtx = output.getContext('2d');
   const maskImage = outputCtx.createImageData(width, height);
   for (let index = 0; index < blocked.length; index += 1) {
-    const alpha = outside[index] ? 0 : 255;
+    const alpha = !outside[index] && !blocked[index] ? 255 : 0;
     const target = index * 4;
     maskImage.data[target] = 255;
     maskImage.data[target + 1] = 255;
