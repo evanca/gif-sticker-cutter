@@ -1,38 +1,45 @@
 # GIF Sticker Cutter
 
-Local/web app for turning an animated GIF into a transparent sticker GIF with:
+Static browser app for turning an animated GIF into a transparent sticker GIF with:
 
+- URL import for CORS-readable GIFs
+- Giphy page/media URL support
+- direct Tenor media URL support
+- local GIF upload fallback
 - red marker outline drawing
 - edge connection for outlines that use image borders
-- smoothed inner-edge mask normalization
 - hardcoded 5px white sticker outline
-- stable animated GIF export
-- automatic silhouette verification
+- client-side animated GIF export
 
-## Architecture
+## GitHub Pages Architecture
 
-The app has two parts:
+The app now runs fully on GitHub Pages. The main workflow is static files only:
 
-- **Static frontend**: `index.html`, `app.js`, `styles.css`, `config.js`
-- **API backend**: `server.mjs` plus Python scripts in `scripts/`
+- `index.html`
+- `styles.css`
+- `app.js`
+- `vendor/omggif.js`
+- `vendor/gif.js`
+- `vendor/gif.worker.js`
 
-This supports a GitHub Pages frontend **only when paired with a hosted backend API**. GitHub Pages cannot run the GIF cutting pipeline by itself.
+No hosted API is required for the browser workflow. Imported GIFs are decoded in the browser, working blobs are cached in IndexedDB, recent URL metadata is stored in `localStorage`, and the final sticker GIF is encoded in the browser for download.
 
-## Requirements
+## URL Support
 
-- Node.js 18+
-- Python 3.10+
-- Python packages from `requirements.txt`
+Browser-only URL import depends on CORS. This app supports the URL shapes that usually allow browser reads:
 
-Install Python dependencies:
+- direct `.gif` URLs with permissive CORS
+- Giphy page URLs, for example `https://giphy.com/gifs/...-JIX9t2j0ZTN9S`
+- Giphy media URLs, for example `https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif`
+- direct Tenor media URLs, for example `https://media.tenor.com/.../name.gif`
 
-```bash
-python3 -m pip install -r requirements.txt
-```
+Tenor public page URLs such as `https://tenor.com/view/...-gif-12345` do not expose enough media information to browser JavaScript without a readable metadata endpoint. For those, use Tenor's "copy GIF address" / direct media URL, or upload the GIF file.
 
-`rembg` is optional and only needed if you run `scripts/make_gif_cutout.py` manually without `--cut-mask`. The web app always uses a saved mask.
+For any provider that blocks CORS, use **Upload**. That path is fully local and works without network access after the page loads.
 
 ## Local Run
+
+You can open `index.html` directly, or run the small local server:
 
 ```bash
 npm start
@@ -44,108 +51,29 @@ Then open:
 http://127.0.0.1:8140/
 ```
 
-If Python package architecture is mismatched on macOS, run with explicit Python settings:
-
-```bash
-PYTHON_ARCH=arm64 PYTHON_BIN=/usr/local/bin/python3 npm start
-```
-
-## GitHub Pages Frontend
-
-1. Host the static files on GitHub Pages.
-2. Deploy the backend API to a server platform such as Render, Fly.io, Railway, or a VPS.
-3. Set `config.js` on the GitHub Pages deployment:
-
-```js
-window.GIF_CUTTER_API_BASE = 'https://your-backend.example.com';
-```
-
-You can also test an API URL with a query parameter:
-
-```text
-https://yourname.github.io/gif-sticker-cutter/?api=https://your-backend.example.com
-```
-
-For local same-origin mode, leave `window.GIF_CUTTER_API_BASE` empty.
-
-## Backend Environment
-
-Recommended public deployment configuration:
-
-```bash
-HOST=0.0.0.0
-PORT=8140
-ALLOWED_ORIGINS=https://yourname.github.io
-PYTHON_BIN=/usr/local/bin/python3
-# macOS local only, if needed:
-# PYTHON_ARCH=arm64
-```
-
-Security and resource limits are configurable:
-
-```bash
-MAX_BODY_BYTES=8388608
-MAX_GIF_BYTES=26214400
-MAX_HTML_BYTES=2097152
-MAX_MASK_BYTES=4194304
-FETCH_TIMEOUT_MS=12000
-PROCESS_TIMEOUT_MS=45000
-MAX_REDIRECTS=3
-MAX_GIF_FRAMES=160
-MAX_GIF_DIMENSION=1200
-MAX_GIF_PIXELS=1440000
-EXPORT_MAX_AGE_MS=3600000
-RATE_WINDOW_MS=60000
-RATE_MAX=30
-TRUST_PROXY=0
-```
-
-## Implemented Security Controls
-
-The backend is designed for a public GitHub Pages frontend plus a hosted API:
-
-- strict CORS allowlist via `ALLOWED_ORIGINS`
-- local origins allowed for development
-- preflight `OPTIONS` support
-- no wildcard CORS
-- in-memory per-IP rate limiting (`TRUST_PROXY=1` only when a trusted platform proxy sets `X-Forwarded-For`)
-- `http`/`https` URL-only fetches
-- credentialed URLs rejected
-- localhost/private/link-local/multicast IPs blocked
-- DNS resolution checked before fetch and after redirects
-- manual redirect following with a redirect limit
-- remote download size limits
-- request body and mask upload size limits
-- fetch and Python processing timeouts
-- GIF frame count, dimension, and pixel-area validation before cutting
-- export filename/path sanitization
-- temporary export cleanup by age
-- no shell interpolation for Python commands (`execFile` is used)
-- static responses include `nosniff` and a restrictive CSP when served by `server.mjs`
-
-Residual deployment risks to handle at the platform level:
-
-- DNS rebinding is reduced but not fully eliminated by pre-fetch DNS checks. Run the backend in a container/VPC without access to sensitive internal services.
-- Python/Pillow/scipy parse untrusted media; keep dependencies updated and run in a constrained container.
-- In-memory rate limiting is per-process. Use platform/proxy rate limiting for multi-instance deployments.
-
 ## Workflow
 
-1. Paste a GIF URL.
-2. Click **Load**.
+1. Paste a supported GIF URL or click **Upload**.
+2. Click **Load** for URL imports.
 3. Draw one red outline around the sticker area.
 4. Use **Connect edges** if the outline should close along image borders.
 5. Click **Save image-aligned mask**.
 6. Click **Cut**.
-7. Use **Download GIF** when verification passes.
+7. Use **Download GIF**.
 
-Generated files are written to `exports/` and ignored by git.
+The browser workflow does not write generated files to the repo. Download links are `blob:` URLs created locally in the page.
 
-## API Endpoints
+## Limits
 
-- `GET /health`
-- `GET /proxy?url=<gif-or-page-url>`
-- `POST /save-overlay`
-- `POST /cut`
+The browser app limits work to keep GitHub Pages usage practical:
 
-The static frontend uses the same endpoints either same-origin or through `window.GIF_CUTTER_API_BASE`.
+- max GIF size: 25 MB
+- max frames: 160
+- max dimension: 1200 px
+- max pixel area: 1,440,000
+
+Large GIFs may still be slow because all decoding, masking, and encoding happens in the user's browser.
+
+## Legacy Local Backend
+
+`server.mjs` and the Python scripts in `scripts/` are retained as local/legacy tooling from the earlier backend implementation. They are not required for GitHub Pages deployment.

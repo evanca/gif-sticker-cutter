@@ -1,4 +1,5 @@
 const gifUrl = document.querySelector('#gifUrl');
+const gifFile = document.querySelector('#gifFile');
 const loadButton = document.querySelector('#loadButton');
 const connectEdgesButton = document.querySelector('#connectEdgesButton');
 const clearButton = document.querySelector('#clearButton');
@@ -14,22 +15,31 @@ const statusText = document.querySelector('#statusText');
 const resultLinks = document.querySelector('#resultLinks');
 const ctx = canvas.getContext('2d');
 
-const rawApiBase = window.GIF_CUTTER_API_BASE || new URLSearchParams(window.location.search).get('api') || localStorage.getItem('gifCutterApiBase') || '';
-const apiBase = rawApiBase.replace(/\/$/, '');
-
-function apiUrl(path) {
-  return apiBase ? `${apiBase}${path}` : path;
-}
-
-function resultUrl(path) {
-  return apiBase ? `${apiBase}/${path.replace(/^\//, '')}` : path;
-}
+const MAX_GIF_BYTES = 25 * 1024 * 1024;
+const MAX_FRAMES = 160;
+const MAX_DIMENSION = 1200;
+const MAX_PIXELS = 1200 * 1200;
+const OUTLINE_PX = 5;
+const PADDING = 24;
+const TRANSPARENT_KEY = '#ff00ff';
+const TRANSPARENT_HEX = 0xff00ff;
+const GIF_WORKER = './vendor/gif.worker.js';
 
 let strokes = [];
 let currentStroke = null;
 let drawing = false;
 let loadingUrl = '';
-let savedMaskPath = '';
+let savedMaskCanvas = null;
+let loadedGif = null;
+
+function setStatus(message) {
+  statusText.textContent = message;
+}
+
+function resetResult() {
+  resultLinks.hidden = true;
+  resultLinks.replaceChildren();
+}
 
 function resizeCanvas() {
   const rect = stage.getBoundingClientRect();
@@ -53,9 +63,7 @@ function redraw() {
   ctx.clearRect(0, 0, rect.width, rect.height);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  for (const stroke of strokes) {
-    drawStroke(stroke);
-  }
+  for (const stroke of strokes) drawStroke(stroke);
   if (currentStroke) drawStroke(currentStroke);
 }
 
@@ -65,14 +73,12 @@ function drawStroke(stroke) {
   ctx.lineWidth = stroke.size;
   ctx.beginPath();
   ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
-  for (const point of stroke.points.slice(1)) {
-    ctx.lineTo(point.x, point.y);
-  }
+  for (const point of stroke.points.slice(1)) ctx.lineTo(point.x, point.y);
   ctx.stroke();
 }
 
 function startDrawing(event) {
-  if (!gifImage.src) return;
+  if (!loadedGif) return;
   drawing = true;
   currentStroke = {
     size: Number(sizeRange.value),
@@ -93,45 +99,11 @@ function stopDrawing() {
   drawing = false;
   strokes.push(currentStroke);
   currentStroke = null;
-  savedMaskPath = '';
+  savedMaskCanvas = null;
   cutButton.disabled = true;
-  resultLinks.hidden = true;
-  resultLinks.replaceChildren();
+  resetResult();
   redraw();
   updateSummary();
-}
-
-function loadGif() {
-  const url = gifUrl.value.trim();
-  if (!url) return;
-  loadingUrl = url;
-  gifImage.src = apiUrl(`/proxy?url=${encodeURIComponent(url)}`);
-  gifImage.style.display = 'block';
-  emptyState.style.display = 'none';
-  strokes = [];
-  currentStroke = null;
-  savedMaskPath = '';
-  cutButton.disabled = true;
-  resultLinks.hidden = true;
-  resultLinks.replaceChildren();
-  redraw();
-  updateSummary();
-}
-
-function showLoadError() {
-  if (!loadingUrl) return;
-  gifImage.style.display = 'none';
-  emptyState.style.display = 'grid';
-  emptyState.textContent = 'Could not load that GIF. Try a direct .gif/media URL, or reload after the proxy resolves the page.';
-  statusText.textContent = `GIF failed to load for ${loadingUrl}`;
-}
-
-function showLoadedGif() {
-  emptyState.textContent = 'Load a GIF URL, then draw the desired sticker outline in red.';
-  gifImage.style.display = 'block';
-  emptyState.style.display = 'none';
-  updateSummary();
-  resizeCanvas();
 }
 
 function imageDisplayRect() {
@@ -162,26 +134,10 @@ function nearestImageEdge(point, display) {
   const right = display.left + display.width;
   const bottom = display.top + display.height;
   const candidates = [
-    {
-      edge: 'top',
-      distance: Math.abs(point.y - display.top),
-      point: { x: Math.min(Math.max(point.x, display.left), right), y: display.top },
-    },
-    {
-      edge: 'right',
-      distance: Math.abs(point.x - right),
-      point: { x: right, y: Math.min(Math.max(point.y, display.top), bottom) },
-    },
-    {
-      edge: 'bottom',
-      distance: Math.abs(point.y - bottom),
-      point: { x: Math.min(Math.max(point.x, display.left), right), y: bottom },
-    },
-    {
-      edge: 'left',
-      distance: Math.abs(point.x - display.left),
-      point: { x: display.left, y: Math.min(Math.max(point.y, display.top), bottom) },
-    },
+    { edge: 'top', distance: Math.abs(point.y - display.top), point: { x: Math.min(Math.max(point.x, display.left), right), y: display.top } },
+    { edge: 'right', distance: Math.abs(point.x - right), point: { x: right, y: Math.min(Math.max(point.y, display.top), bottom) } },
+    { edge: 'bottom', distance: Math.abs(point.y - bottom), point: { x: Math.min(Math.max(point.x, display.left), right), y: bottom } },
+    { edge: 'left', distance: Math.abs(point.x - display.left), point: { x: display.left, y: Math.min(Math.max(point.y, display.top), bottom) } },
   ];
   candidates.sort((a, b) => a.distance - b.distance);
   return candidates[0];
@@ -202,12 +158,8 @@ function pointAtEdgePosition(position, display) {
   const right = display.left + display.width;
   const bottom = display.top + display.height;
   if (wrapped <= display.width) return { x: display.left + wrapped, y: display.top };
-  if (wrapped <= display.width + display.height) {
-    return { x: right, y: display.top + wrapped - display.width };
-  }
-  if (wrapped <= display.width * 2 + display.height) {
-    return { x: right - (wrapped - display.width - display.height), y: bottom };
-  }
+  if (wrapped <= display.width + display.height) return { x: right, y: display.top + wrapped - display.width };
+  if (wrapped <= display.width * 2 + display.height) return { x: right - (wrapped - display.width - display.height), y: bottom };
   return { x: display.left, y: bottom - (wrapped - display.width * 2 - display.height) };
 }
 
@@ -228,7 +180,7 @@ function edgePathBetween(startEdge, endEdge, display) {
 }
 
 function connectEdges() {
-  if (!gifImage.naturalWidth || !gifImage.naturalHeight) return;
+  if (!loadedGif) return;
   const first = firstDrawnPoint();
   const last = lastDrawnPoint();
   if (!first || !last) return;
@@ -241,71 +193,396 @@ function connectEdges() {
     size: Number(sizeRange.value),
     points: [last, lastEdge.point, ...edgePoints, firstEdge.point, first],
   });
-  savedMaskPath = '';
+  savedMaskCanvas = null;
   cutButton.disabled = true;
   redraw();
   updateSummary();
 }
 
-async function saveImageAlignedMask() {
-  if (!gifImage.naturalWidth || !gifImage.naturalHeight) return;
+function openGifDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('gif-sticker-cutter', 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore('gifs', { keyPath: 'id' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function storeGifBlob(id, blob, source) {
+  try {
+    const db = await openGifDb();
+    const tx = db.transaction('gifs', 'readwrite');
+    tx.objectStore('gifs').put({ id, blob, source, savedAt: Date.now() });
+    localStorage.setItem('gifStickerLastGifId', id);
+    const recent = JSON.parse(localStorage.getItem('gifStickerRecentUrls') || '[]');
+    if (source && source.url) {
+      localStorage.setItem('gifStickerRecentUrls', JSON.stringify([source.url, ...recent.filter((url) => url !== source.url)].slice(0, 10)));
+    }
+  } catch {
+    // IndexedDB is a cache convenience. The current in-memory GIF can still be processed.
+  }
+}
+
+function giphyIdFromUrl(url) {
+  const parsed = new URL(url);
+  if (!/(^|\.)giphy\.com$/i.test(parsed.hostname)) return null;
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (parts[0] === 'media' && parts[1]) return parts[1];
+  const last = parts[parts.length - 1] || '';
+  const slugMatch = last.match(/([a-zA-Z0-9]+)$/);
+  return slugMatch ? slugMatch[1] : null;
+}
+
+function mediaCandidatesForUrl(url) {
+  const candidates = [url];
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return candidates;
+  }
+
+  const giphyId = giphyIdFromUrl(url);
+  if (giphyId) {
+    candidates.push(`https://media.giphy.com/media/${giphyId}/giphy.gif`);
+    candidates.push(`https://i.giphy.com/media/${giphyId}/giphy.gif`);
+  }
+
+  if (/(^|\.)tenor\.com$/i.test(parsed.hostname)) {
+    candidates.push(`https://tenor.com/oembed?url=${encodeURIComponent(url)}`);
+  }
+
+  if (/^media\d*\.tenor\.com$/i.test(parsed.hostname) && !parsed.pathname.toLowerCase().endsWith('.gif')) {
+    const gifPath = parsed.pathname
+      .replace(/AAAA(?:AN|AM|AP|Ad|AS|AC)\//, 'AAAAAC/')
+      .replace(/\.(png|jpg|jpeg|webp)$/i, '.gif');
+    candidates.push(`${parsed.origin}${gifPath}`);
+  }
+
+  if (/(^|\.)giphy\.com$/i.test(parsed.hostname)) {
+    candidates.push(`https://giphy.com/services/oembed?url=${encodeURIComponent(url)}`);
+  }
+
+  return [...new Set(candidates)];
+}
+
+function extractGifUrlsFromText(text) {
+  return [...new Set([
+    ...text.matchAll(/https?:\\?\/\\?\/[^"'<>\\\s]+?\.gif(?:\?[^"'<>\\\s]*)?/gi),
+  ].map((match) => match[0].replace(/\\\//g, '/').replace(/&amp;/g, '&')))];
+}
+
+async function fetchGifBytes(candidate, visited = new Set()) {
+  if (visited.has(candidate)) throw new Error('Repeated URL resolution');
+  visited.add(candidate);
+
+  const response = await fetch(candidate, { mode: 'cors', credentials: 'omit' });
+  if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+  const contentType = response.headers.get('content-type') || '';
+  const buffer = await response.arrayBuffer();
+  if (buffer.byteLength > MAX_GIF_BYTES) throw new Error('GIF is too large');
+
+  const signature = new TextDecoder('ascii').decode(buffer.slice(0, 6));
+  if (signature === 'GIF87a' || signature === 'GIF89a') {
+    return { buffer, resolvedUrl: response.url, contentType: contentType || 'image/gif' };
+  }
+
+  const text = new TextDecoder().decode(buffer);
+  const urls = contentType.includes('json')
+    ? extractGifUrlsFromText(JSON.stringify(JSON.parse(text)))
+    : extractGifUrlsFromText(text);
+  for (const url of urls) {
+    try {
+      return await fetchGifBytes(url, visited);
+    } catch {
+      // Try the next media candidate from provider metadata.
+    }
+  }
+  throw new Error('No CORS-readable GIF media URL was found');
+}
+
+async function fetchGifFromUrl(url) {
+  const errors = [];
+  for (const candidate of mediaCandidatesForUrl(url)) {
+    try {
+      return await fetchGifBytes(candidate);
+    } catch (error) {
+      errors.push(`${candidate}: ${error.message || error}`);
+    }
+  }
+  throw new Error(`Could not import that URL in the browser. Giphy page/media URLs and direct Tenor media URLs usually work; for Tenor pages use "copy GIF address" or Upload. ${errors[0] || ''}`);
+}
+
+function validateGif(frames, width, height) {
+  if (!frames.length) throw new Error('GIF has no frames');
+  if (frames.length > MAX_FRAMES) throw new Error(`GIF has too many frames (${frames.length}/${MAX_FRAMES})`);
+  if (width > MAX_DIMENSION || height > MAX_DIMENSION) throw new Error(`GIF is too large (${width}x${height})`);
+  if (width * height > MAX_PIXELS) throw new Error(`GIF pixel area is too large (${width * height})`);
+}
+
+function decodeGif(buffer) {
+  if (!window.GifReader) {
+    throw new Error('GIF decoder did not load. Check the network connection and reload.');
+  }
+  const reader = new window.GifReader(new Uint8Array(buffer));
+  const width = reader.width;
+  const height = reader.height;
+  const frameCount = reader.numFrames();
+  validateGif(new Array(frameCount), width, height);
+  const frames = [];
+  for (let index = 0; index < frameCount; index += 1) {
+    const pixels = new Uint8ClampedArray(width * height * 4);
+    const info = reader.frameInfo(index);
+    reader.decodeAndBlitFrameRGBA(index, pixels);
+    frames.push({
+      pixels,
+      delay: Math.max(20, (info.delay || 10) * 10),
+    });
+  }
+  return {
+    width,
+    height,
+    frames,
+  };
+}
+
+function imageDataUrlFromPixels(width, height, pixels) {
+  const output = document.createElement('canvas');
+  output.width = width;
+  output.height = height;
+  output.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(pixels), width, height), 0, 0);
+  return output.toDataURL('image/png');
+}
+
+async function loadDecodedGif(buffer, source) {
+  const decoded = decodeGif(buffer);
+  const blob = new Blob([buffer], { type: 'image/gif' });
+  const id = `gif-${Date.now()}`;
+  await storeGifBlob(id, blob, source);
+  if (loadedGif?.objectUrl) URL.revokeObjectURL(loadedGif.objectUrl);
+
+  loadedGif = {
+    ...decoded,
+    id,
+    source,
+    buffer,
+    objectUrl: URL.createObjectURL(blob),
+  };
+
+  gifImage.src = loadedGif.objectUrl;
+  gifImage.style.display = 'block';
+  emptyState.style.display = 'none';
+  strokes = [];
+  currentStroke = null;
+  savedMaskCanvas = null;
+  cutButton.disabled = true;
+  saveAlignedButton.textContent = 'Save image-aligned mask';
+  resetResult();
+  setStatus(`Loaded ${decoded.width}x${decoded.height}, ${decoded.frames.length} frame(s). Draw the outline.`);
+}
+
+async function loadGif() {
+  const url = gifUrl.value.trim();
+  if (!url) return;
+  loadingUrl = url;
+  setStatus('Importing GIF in the browser...');
+  try {
+    const result = await fetchGifFromUrl(url);
+    await loadDecodedGif(result.buffer, { type: 'url', url, resolvedUrl: result.resolvedUrl });
+  } catch (error) {
+    gifImage.style.display = 'none';
+    emptyState.style.display = 'grid';
+    emptyState.textContent = 'URL import failed. Giphy URLs and direct Tenor media URLs are supported when CORS allows it; upload a GIF file as fallback.';
+    setStatus(`URL import failed for ${loadingUrl}: ${error.message || error}`);
+  }
+}
+
+async function loadLocalFile(file) {
+  if (!file) return;
+  if (file.size > MAX_GIF_BYTES) {
+    setStatus(`GIF is too large (${Math.round(file.size / 1024 / 1024)} MB).`);
+    return;
+  }
+  setStatus('Reading local GIF...');
+  try {
+    await loadDecodedGif(await file.arrayBuffer(), { type: 'file', name: file.name });
+    gifUrl.value = '';
+  } catch (error) {
+    setStatus(`Upload failed: ${error.message || error}`);
+  }
+}
+
+function showLoadedGif() {
+  if (!loadedGif) return;
+  emptyState.textContent = 'Load a GIF URL or upload a GIF, then draw the desired sticker outline in red.';
+  gifImage.style.display = 'block';
+  emptyState.style.display = 'none';
+  resizeCanvas();
+}
+
+function buildMaskCanvas() {
+  if (!loadedGif) throw new Error('Load a GIF first');
+  const points = strokes.flatMap((stroke) => stroke.points);
+  if (points.length < 3) throw new Error('Draw a closed outline first');
+
   const display = imageDisplayRect();
   const output = document.createElement('canvas');
-  output.width = gifImage.naturalWidth;
-  output.height = gifImage.naturalHeight;
+  output.width = loadedGif.width;
+  output.height = loadedGif.height;
   const outputCtx = output.getContext('2d');
-  outputCtx.strokeStyle = '#ff2424';
-  outputCtx.lineCap = 'round';
-  outputCtx.lineJoin = 'round';
   const scaleX = output.width / display.width;
   const scaleY = output.height / display.height;
 
-  for (const stroke of strokes) {
-    if (stroke.points.length < 2) continue;
-    outputCtx.lineWidth = stroke.size * ((scaleX + scaleY) / 2);
-    outputCtx.beginPath();
-    outputCtx.moveTo(
-      (stroke.points[0].x - display.left) * scaleX,
-      (stroke.points[0].y - display.top) * scaleY,
-    );
-    for (const point of stroke.points.slice(1)) {
-      outputCtx.lineTo(
-        (point.x - display.left) * scaleX,
-        (point.y - display.top) * scaleY,
-      );
-    }
-    outputCtx.stroke();
-  }
-
-  const response = await fetch(apiUrl('/save-overlay'), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      png: output.toDataURL('image/png'),
-      prefix: 'gif-sticker-image-aligned',
-    }),
+  outputCtx.fillStyle = '#fff';
+  outputCtx.beginPath();
+  points.forEach((point, index) => {
+    const x = (point.x - display.left) * scaleX;
+    const y = (point.y - display.top) * scaleY;
+    if (index === 0) outputCtx.moveTo(x, y);
+    else outputCtx.lineTo(x, y);
   });
-  if (!response.ok) throw new Error(await response.text());
-  const result = await response.json();
-  savedMaskPath = result.path;
-  cutButton.disabled = false;
-  saveAlignedButton.textContent = `Saved: ${result.path}`;
-  statusText.textContent = 'Mask saved. Ready to cut.';
+  outputCtx.closePath();
+  outputCtx.fill();
+
+  return output;
 }
 
-function updateSummary() {
-  const url = gifUrl.value.trim();
-  statusText.textContent = url
-    ? `${strokes.length} red outline stroke(s) drawn.`
-    : 'Load a GIF, draw the red outline, then save the mask.';
+async function saveImageAlignedMask() {
+  try {
+    savedMaskCanvas = buildMaskCanvas();
+    cutButton.disabled = false;
+    saveAlignedButton.textContent = 'Mask saved locally';
+    setStatus('Mask saved in the browser. Ready to cut.');
+  } catch (error) {
+    setStatus(`Mask save failed: ${error.message || error}`);
+  }
 }
 
-function resultLink(label, path, options = {}) {
+function dilateMask(mask, width, height, radius) {
+  const output = new Uint8ClampedArray(mask.length);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let value = 0;
+      for (let dy = -radius; dy <= radius && !value; dy += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          if (dx * dx + dy * dy > radius * radius) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          if (mask[ny * width + nx]) {
+            value = 255;
+            break;
+          }
+        }
+      }
+      output[y * width + x] = value;
+    }
+  }
+  return output;
+}
+
+function alphaMaskFromCanvas(maskCanvas) {
+  const data = maskCanvas.getContext('2d').getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
+  const mask = new Uint8ClampedArray(maskCanvas.width * maskCanvas.height);
+  for (let index = 0; index < mask.length; index += 1) {
+    mask[index] = data[index * 4 + 3] > 0 ? 255 : 0;
+  }
+  return mask;
+}
+
+function frameCanvas(frame, mask, outline, width, height) {
+  const canvasFrame = document.createElement('canvas');
+  canvasFrame.width = width + PADDING * 2;
+  canvasFrame.height = height + PADDING * 2;
+  const frameCtx = canvasFrame.getContext('2d');
+  frameCtx.fillStyle = TRANSPARENT_KEY;
+  frameCtx.fillRect(0, 0, canvasFrame.width, canvasFrame.height);
+
+  const imageData = frameCtx.createImageData(canvasFrame.width, canvasFrame.height);
+  const data = imageData.data;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const sourceIndex = y * width + x;
+      const source = sourceIndex * 4;
+      const target = ((y + PADDING) * canvasFrame.width + x + PADDING) * 4;
+      if (outline[sourceIndex]) {
+        data[target] = 255;
+        data[target + 1] = 255;
+        data[target + 2] = 255;
+        data[target + 3] = 255;
+      } else {
+        data[target] = 255;
+        data[target + 1] = 0;
+        data[target + 2] = 255;
+        data[target + 3] = 255;
+      }
+      if (mask[sourceIndex]) {
+        data[target] = frame.pixels[source];
+        data[target + 1] = frame.pixels[source + 1];
+        data[target + 2] = frame.pixels[source + 2];
+        data[target + 3] = frame.pixels[source + 3];
+      }
+    }
+  }
+  frameCtx.putImageData(imageData, 0, 0);
+  return canvasFrame;
+}
+
+function makeContactSheet(canvases) {
+  const columns = Math.min(4, canvases.length);
+  const thumb = 180;
+  const rows = Math.ceil(canvases.length / columns);
+  const sheet = document.createElement('canvas');
+  sheet.width = columns * (thumb + 20);
+  sheet.height = rows * (thumb + 42);
+  const sheetCtx = sheet.getContext('2d');
+  sheetCtx.fillStyle = '#fff';
+  sheetCtx.fillRect(0, 0, sheet.width, sheet.height);
+  sheetCtx.fillStyle = '#111';
+  sheetCtx.font = '14px monospace';
+  canvases.forEach((frame, index) => {
+    const scale = Math.min(thumb / frame.width, thumb / frame.height);
+    const width = Math.round(frame.width * scale);
+    const height = Math.round(frame.height * scale);
+    const x = (index % columns) * (thumb + 20) + 10;
+    const y = Math.floor(index / columns) * (thumb + 42) + 10;
+    sheetCtx.drawImage(frame, x, y, width, height);
+    sheetCtx.fillText(`frame ${index}`, x, y + thumb + 22);
+  });
+  return sheet;
+}
+
+function canvasBlob(canvas, type = 'image/png') {
+  return new Promise((resolve) => canvas.toBlob(resolve, type));
+}
+
+function encodeGif(canvases, delays) {
+  if (!window.GIF) throw new Error('GIF encoder did not load. Check the network connection and reload.');
+  return new Promise((resolve, reject) => {
+    const gif = new window.GIF({
+      workers: 2,
+      quality: 10,
+      repeat: 0,
+      transparent: TRANSPARENT_HEX,
+      workerScript: GIF_WORKER,
+      width: canvases[0].width,
+      height: canvases[0].height,
+    });
+    canvases.forEach((frame, index) => gif.addFrame(frame, { copy: true, delay: delays[index] || 100 }));
+    gif.on('finished', resolve);
+    gif.on('abort', () => reject(new Error('GIF encoding aborted')));
+    gif.render();
+  });
+}
+
+function downloadLink(label, url, download) {
   const link = document.createElement('a');
-  link.href = resultUrl(path);
+  link.href = url;
   link.textContent = label;
-  if (options.download) {
-    link.download = options.download;
+  if (download) {
+    link.download = download;
     link.className = 'download-link';
   } else {
     link.target = '_blank';
@@ -314,65 +591,64 @@ function resultLink(label, path, options = {}) {
   return link;
 }
 
-function filenameFromPath(path) {
-  return path.split('/').pop() || 'sticker.gif';
-}
-
 async function cutGif() {
-  const sourceUrl = gifUrl.value.trim();
-  if (!sourceUrl || !savedMaskPath) return;
-
+  if (!loadedGif || !savedMaskCanvas) return;
   cutButton.disabled = true;
   saveAlignedButton.disabled = true;
-  statusText.textContent = 'Cutting and verifying...';
-  resultLinks.hidden = true;
-  resultLinks.replaceChildren();
+  resetResult();
+  setStatus('Cutting and encoding in the browser...');
 
   try {
-    const response = await fetch(apiUrl('/cut'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sourceUrl, maskPath: savedMaskPath }),
-    });
-    if (!response.ok) throw new Error(await response.text());
-    const result = await response.json();
+    const mask = alphaMaskFromCanvas(savedMaskCanvas);
+    const outline = dilateMask(mask, loadedGif.width, loadedGif.height, OUTLINE_PX);
+    const outputFrames = loadedGif.frames.map((frame) => frameCanvas(frame, mask, outline, loadedGif.width, loadedGif.height));
+    const delays = loadedGif.frames.map((frame) => frame.delay);
+    const gifBlob = await encodeGif(outputFrames, delays);
+    const previewBlob = await canvasBlob(outputFrames[0], 'image/png');
+    const contactBlob = await canvasBlob(makeContactSheet(outputFrames), 'image/png');
+
+    const stamp = Date.now();
     resultLinks.append(
-      resultLink('Download GIF', result.output, { download: filenameFromPath(result.output) }),
-      resultLink('Preview', result.preview),
-      resultLink('Contact sheet', result.contactSheet),
+      downloadLink('Download GIF', URL.createObjectURL(gifBlob), `sticker-${stamp}.gif`),
+      downloadLink('Preview', URL.createObjectURL(previewBlob)),
+      downloadLink('Contact sheet', URL.createObjectURL(contactBlob)),
     );
     resultLinks.hidden = false;
-    statusText.textContent = 'Cut complete. Verification passed.';
+    setStatus('Cut complete. Exported fully in the browser.');
   } catch (error) {
     cutButton.disabled = false;
-    statusText.textContent = `Cut failed: ${error.message || error}`;
+    setStatus(`Cut failed: ${error.message || error}`);
   } finally {
     saveAlignedButton.disabled = false;
   }
 }
 
+function updateSummary() {
+  const source = loadedGif ? `${loadedGif.frames.length} frame(s)` : 'No GIF loaded';
+  setStatus(`${source}. ${strokes.length} red outline stroke(s) drawn.`);
+}
+
 loadButton.addEventListener('click', loadGif);
+gifFile.addEventListener('change', () => loadLocalFile(gifFile.files[0]));
 connectEdgesButton.addEventListener('click', connectEdges);
 cutButton.addEventListener('click', cutGif);
+saveAlignedButton.addEventListener('click', saveImageAlignedMask);
 clearButton.addEventListener('click', () => {
   strokes = [];
   currentStroke = null;
-  savedMaskPath = '';
+  savedMaskCanvas = null;
   cutButton.disabled = true;
-  resultLinks.hidden = true;
-  resultLinks.replaceChildren();
+  resetResult();
   redraw();
   updateSummary();
 });
 undoButton.addEventListener('click', () => {
   strokes.pop();
-  savedMaskPath = '';
+  savedMaskCanvas = null;
   cutButton.disabled = true;
   redraw();
   updateSummary();
 });
-saveAlignedButton.addEventListener('click', saveImageAlignedMask);
-gifImage.addEventListener('error', showLoadError);
 gifImage.addEventListener('load', showLoadedGif);
 canvas.addEventListener('pointerdown', startDrawing);
 canvas.addEventListener('pointermove', continueDrawing);

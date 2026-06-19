@@ -1,1 +1,0 @@
-window.GIF_CUTTER_API_BASE = window.GIF_CUTTER_API_BASE || '';

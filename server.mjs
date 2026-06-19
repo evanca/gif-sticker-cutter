@@ -421,7 +421,7 @@ const server = createServer(async (request, response) => {
     const headers = {
       'content-type': types[extname(filePath)] || 'application/octet-stream',
       'x-content-type-options': 'nosniff',
-      'content-security-policy': "default-src 'self'; img-src 'self' https: data: blob:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+      'content-security-policy': "default-src 'self'; img-src 'self' https: data: blob:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; script-src 'self'; worker-src 'self' blob:; style-src 'self'; base-uri 'none'; frame-ancestors 'none'",
     };
     writeResponse(response, 200, headers, file);
   } catch (error) {

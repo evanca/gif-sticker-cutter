@@ -20,7 +20,8 @@ body {
 }
 
 button,
-input {
+input,
+.file-button {
   font: inherit;
 }
 
@@ -67,6 +68,9 @@ label,
 }
 
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 42px;
   border: 3px solid var(--ink);
   background: #fff;
@@ -75,6 +79,25 @@ button {
   padding: 0 14px;
   cursor: pointer;
   box-shadow: 4px 4px 0 var(--ink);
+}
+
+.file-button {
+  height: 42px;
+  border: 3px solid var(--ink);
+  background: #fff;
+  color: var(--ink);
+  font-weight: 900;
+  padding: 8px 14px 0;
+  cursor: pointer;
+  box-shadow: 4px 4px 0 var(--ink);
+}
+
+#gifFile {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 button.active {
