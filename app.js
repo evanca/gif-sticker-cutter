@@ -14,6 +14,17 @@ const statusText = document.querySelector('#statusText');
 const resultLinks = document.querySelector('#resultLinks');
 const ctx = canvas.getContext('2d');
 
+const rawApiBase = window.GIF_CUTTER_API_BASE || new URLSearchParams(window.location.search).get('api') || localStorage.getItem('gifCutterApiBase') || '';
+const apiBase = rawApiBase.replace(/\/$/, '');
+
+function apiUrl(path) {
+  return apiBase ? `${apiBase}${path}` : path;
+}
+
+function resultUrl(path) {
+  return apiBase ? `${apiBase}/${path.replace(/^\//, '')}` : path;
+}
+
 let strokes = [];
 let currentStroke = null;
 let drawing = false;
@@ -94,7 +105,7 @@ function loadGif() {
   const url = gifUrl.value.trim();
   if (!url) return;
   loadingUrl = url;
-  gifImage.src = `/proxy?url=${encodeURIComponent(url)}`;
+  gifImage.src = apiUrl(`/proxy?url=${encodeURIComponent(url)}`);
   gifImage.style.display = 'block';
   emptyState.style.display = 'none';
   strokes = [];
@@ -266,7 +277,7 @@ async function saveImageAlignedMask() {
     outputCtx.stroke();
   }
 
-  const response = await fetch('/save-overlay', {
+  const response = await fetch(apiUrl('/save-overlay'), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -291,7 +302,7 @@ function updateSummary() {
 
 function resultLink(label, path, options = {}) {
   const link = document.createElement('a');
-  link.href = path;
+  link.href = resultUrl(path);
   link.textContent = label;
   if (options.download) {
     link.download = options.download;
@@ -318,7 +329,7 @@ async function cutGif() {
   resultLinks.replaceChildren();
 
   try {
-    const response = await fetch('/cut', {
+    const response = await fetch(apiUrl('/cut'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ sourceUrl, maskPath: savedMaskPath }),
