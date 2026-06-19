@@ -20,6 +20,11 @@ const MAX_FRAMES = 160;
 const MAX_DIMENSION = 1200;
 const MAX_PIXELS = 1200 * 1200;
 const OUTLINE_PX = 5;
+const RED_GROW_PX = 5;
+const CLOSE_RADIUS_PX = 10;
+const OPEN_RADIUS_PX = 5;
+const SMOOTH_SIGMA = 7;
+const SMOOTH_THRESHOLD = 0.5;
 const PADDING = 24;
 const TRANSPARENT_KEY = '#ff00ff';
 const TRANSPARENT_HEX = 0xff00ff;
@@ -446,6 +451,152 @@ function showLoadedGif() {
   resizeCanvas();
 }
 
+const diskCache = new Map();
+
+function diskOffsets(radius) {
+  if (diskCache.has(radius)) return diskCache.get(radius);
+  const offsets = [];
+  for (let y = -radius; y <= radius; y += 1) {
+    for (let x = -radius; x <= radius; x += 1) {
+      if (x * x + y * y <= radius * radius) offsets.push([x, y]);
+    }
+  }
+  diskCache.set(radius, offsets);
+  return offsets;
+}
+
+function dilateBinary(mask, width, height, radius) {
+  const output = new Uint8Array(mask.length);
+  const offsets = diskOffsets(radius);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const target = y * width + x;
+      for (const [dx, dy] of offsets) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        if (mask[ny * width + nx]) {
+          output[target] = 1;
+          break;
+        }
+      }
+    }
+  }
+  return output;
+}
+
+function erodeBinary(mask, width, height, radius) {
+  const output = new Uint8Array(mask.length);
+  const offsets = diskOffsets(radius);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const target = y * width + x;
+      let keep = 1;
+      for (const [dx, dy] of offsets) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height || !mask[ny * width + nx]) {
+          keep = 0;
+          break;
+        }
+      }
+      output[target] = keep;
+    }
+  }
+  return output;
+}
+
+function closeBinary(mask, width, height, radius) {
+  return erodeBinary(dilateBinary(mask, width, height, radius), width, height, radius);
+}
+
+function openBinary(mask, width, height, radius) {
+  return dilateBinary(erodeBinary(mask, width, height, radius), width, height, radius);
+}
+
+function gaussianKernel(sigma) {
+  const radius = Math.ceil(sigma * 3);
+  const kernel = [];
+  let total = 0;
+  for (let x = -radius; x <= radius; x += 1) {
+    const value = Math.exp(-(x * x) / (2 * sigma * sigma));
+    kernel.push(value);
+    total += value;
+  }
+  return kernel.map((value) => value / total);
+}
+
+function gaussianBlur(mask, width, height, sigma) {
+  const kernel = gaussianKernel(sigma);
+  const radius = Math.floor(kernel.length / 2);
+  const horizontal = new Float32Array(mask.length);
+  const output = new Float32Array(mask.length);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let value = 0;
+      for (let k = -radius; k <= radius; k += 1) {
+        const nx = Math.min(width - 1, Math.max(0, x + k));
+        value += mask[y * width + nx] * kernel[k + radius];
+      }
+      horizontal[y * width + x] = value;
+    }
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let value = 0;
+      for (let k = -radius; k <= radius; k += 1) {
+        const ny = Math.min(height - 1, Math.max(0, y + k));
+        value += horizontal[ny * width + x] * kernel[k + radius];
+      }
+      output[y * width + x] = value;
+    }
+  }
+
+  return output;
+}
+
+function fillHoles(mask, width, height) {
+  const outside = floodOutside(mask, width, height);
+  const output = new Uint8Array(mask.length);
+  for (let index = 0; index < mask.length; index += 1) {
+    output[index] = mask[index] || !outside[index] ? 1 : 0;
+  }
+  return output;
+}
+
+function floodOutside(blocked, width, height) {
+  const outside = new Uint8Array(width * height);
+  const queue = [];
+  function enqueue(x, y) {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const index = y * width + x;
+    if (outside[index] || blocked[index]) return;
+    outside[index] = 1;
+    queue.push(index);
+  }
+
+  for (let x = 0; x < width; x += 1) {
+    enqueue(x, 0);
+    enqueue(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    enqueue(0, y);
+    enqueue(width - 1, y);
+  }
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const index = queue[cursor];
+    const x = index % width;
+    const y = Math.floor(index / width);
+    enqueue(x + 1, y);
+    enqueue(x - 1, y);
+    enqueue(x, y + 1);
+    enqueue(x, y - 1);
+  }
+  return outside;
+}
+
 function buildMaskCanvas() {
   if (!loadedGif) throw new Error('Load a GIF first');
   if (!strokes.some((stroke) => stroke.points.length > 1)) throw new Error('Draw a closed outline first');
@@ -486,41 +637,34 @@ function buildMaskCanvas() {
     blocked[index] = boundaryData[index * 4 + 3] > 0 ? 1 : 0;
   }
 
-  const outside = new Uint8Array(width * height);
-  const queue = [];
-  function enqueue(x, y) {
-    if (x < 0 || y < 0 || x >= width || y >= height) return;
-    const index = y * width + x;
-    if (outside[index] || blocked[index]) return;
-    outside[index] = 1;
-    queue.push(index);
+  const outside = floodOutside(dilateBinary(blocked, width, height, 1), width, height);
+  const filled = new Uint8Array(width * height);
+  for (let index = 0; index < filled.length; index += 1) {
+    filled[index] = outside[index] ? 0 : 1;
   }
 
-  for (let x = 0; x < width; x += 1) {
-    enqueue(x, 0);
-    enqueue(x, height - 1);
+  const redExclusion = dilateBinary(blocked, width, height, RED_GROW_PX);
+  const inner = new Uint8Array(width * height);
+  for (let index = 0; index < inner.length; index += 1) {
+    inner[index] = filled[index] && !redExclusion[index] ? 1 : 0;
   }
-  for (let y = 0; y < height; y += 1) {
-    enqueue(0, y);
-    enqueue(width - 1, y);
+
+  const smoothed = openBinary(closeBinary(inner, width, height, CLOSE_RADIUS_PX), width, height, OPEN_RADIUS_PX);
+  const soft = gaussianBlur(smoothed, width, height, SMOOTH_SIGMA);
+  const innerLimit = dilateBinary(inner, width, height, 3);
+  const allowed = new Uint8Array(width * height);
+  for (let index = 0; index < allowed.length; index += 1) {
+    allowed[index] = soft[index] >= SMOOTH_THRESHOLD && innerLimit[index] ? 1 : 0;
   }
-  for (let cursor = 0; cursor < queue.length; cursor += 1) {
-    const index = queue[cursor];
-    const x = index % width;
-    const y = Math.floor(index / width);
-    enqueue(x + 1, y);
-    enqueue(x - 1, y);
-    enqueue(x, y + 1);
-    enqueue(x, y - 1);
-  }
+  const cutMask = erodeBinary(fillHoles(allowed, width, height), width, height, OUTLINE_PX);
 
   const output = document.createElement('canvas');
   output.width = width;
   output.height = height;
   const outputCtx = output.getContext('2d');
   const maskImage = outputCtx.createImageData(width, height);
-  for (let index = 0; index < blocked.length; index += 1) {
-    const alpha = !outside[index] && !blocked[index] ? 255 : 0;
+  for (let index = 0; index < cutMask.length; index += 1) {
+    const alpha = cutMask[index] ? 255 : 0;
     const target = index * 4;
     maskImage.data[target] = 255;
     maskImage.data[target + 1] = 255;
