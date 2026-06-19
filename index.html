@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GIF Sticker Cutter</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="toolbar">
+        <div class="url-row">
+          <label for="gifUrl">GIF URL</label>
+          <input
+            id="gifUrl"
+            type="url"
+            spellcheck="false"
+            placeholder="https://media1.tenor.com/..."
+          />
+          <button id="loadButton" type="button">Load</button>
+        </div>
+        <div class="tools-row">
+          <button id="markerButton" class="active" type="button">Red marker</button>
+          <label class="slider-label" for="sizeRange">Size</label>
+          <input id="sizeRange" type="range" min="4" max="48" value="16" />
+          <button id="connectEdgesButton" type="button">Connect edges</button>
+          <button id="undoButton" type="button">Undo</button>
+          <button id="clearButton" type="button">Clear</button>
+          <button id="saveAlignedButton" type="button">Save image-aligned mask</button>
+          <button id="cutButton" type="button" disabled>Cut</button>
+        </div>
+      </section>
+
+      <section class="stage-wrap">
+        <div id="stage" class="stage">
+          <img id="gifImage" alt="GIF preview" />
+          <canvas id="drawCanvas"></canvas>
+          <div id="emptyState" class="empty-state">Load a GIF URL, then draw the desired sticker outline in red.</div>
+        </div>
+      </section>
+
+      <section id="statusPanel" class="status-panel">
+        <div id="statusText">Load a GIF, draw the red outline, then save the mask.</div>
+        <div id="resultLinks" class="result-links" hidden></div>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>
