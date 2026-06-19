@@ -22,7 +22,7 @@ The app now runs fully on GitHub Pages. The main workflow is static files only:
 - `vendor/gif.js`
 - `vendor/gif.worker.js`
 
-No hosted API is required for the browser workflow. Imported GIFs are decoded in the browser, working blobs are cached in IndexedDB, recent URL metadata is stored in `localStorage`, and the final sticker GIF is encoded in the browser for download.
+No hosted API is required for the browser workflow. Imported GIFs and saved masks are cached in IndexedDB, recent URL metadata is stored in `localStorage`, and the final sticker GIF is encoded in the browser for download.
 
 ## URL Support
 

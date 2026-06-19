@@ -201,9 +201,11 @@ function connectEdges() {
 
 function openGifDb() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('gif-sticker-cutter', 1);
+    const request = indexedDB.open('gif-sticker-cutter', 2);
     request.onupgradeneeded = () => {
-      request.result.createObjectStore('gifs', { keyPath: 'id' });
+      const db = request.result;
+      if (!db.objectStoreNames.contains('gifs')) db.createObjectStore('gifs', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('masks')) db.createObjectStore('masks', { keyPath: 'id' });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -222,6 +224,28 @@ async function storeGifBlob(id, blob, source) {
     }
   } catch {
     // IndexedDB is a cache convenience. The current in-memory GIF can still be processed.
+  }
+}
+
+async function storeMaskCanvas(maskCanvas) {
+  if (!loadedGif) return;
+  try {
+    const blob = await canvasBlob(maskCanvas, 'image/png');
+    const id = `mask-${loadedGif.id}`;
+    const db = await openGifDb();
+    const tx = db.transaction('masks', 'readwrite');
+    tx.objectStore('masks').put({
+      id,
+      gifId: loadedGif.id,
+      blob,
+      source: loadedGif.source,
+      width: maskCanvas.width,
+      height: maskCanvas.height,
+      savedAt: Date.now(),
+    });
+    localStorage.setItem('gifStickerLastMaskId', id);
+  } catch {
+    // Mask persistence is best-effort; the in-memory mask remains usable.
   }
 }
 
@@ -424,27 +448,86 @@ function showLoadedGif() {
 
 function buildMaskCanvas() {
   if (!loadedGif) throw new Error('Load a GIF first');
-  const points = strokes.flatMap((stroke) => stroke.points);
-  if (points.length < 3) throw new Error('Draw a closed outline first');
+  if (!strokes.some((stroke) => stroke.points.length > 1)) throw new Error('Draw a closed outline first');
 
   const display = imageDisplayRect();
-  const output = document.createElement('canvas');
-  output.width = loadedGif.width;
-  output.height = loadedGif.height;
-  const outputCtx = output.getContext('2d');
-  const scaleX = output.width / display.width;
-  const scaleY = output.height / display.height;
+  const boundary = document.createElement('canvas');
+  boundary.width = loadedGif.width;
+  boundary.height = loadedGif.height;
+  const boundaryCtx = boundary.getContext('2d');
+  const scaleX = boundary.width / display.width;
+  const scaleY = boundary.height / display.height;
 
-  outputCtx.fillStyle = '#fff';
-  outputCtx.beginPath();
-  points.forEach((point, index) => {
-    const x = (point.x - display.left) * scaleX;
-    const y = (point.y - display.top) * scaleY;
-    if (index === 0) outputCtx.moveTo(x, y);
-    else outputCtx.lineTo(x, y);
-  });
-  outputCtx.closePath();
-  outputCtx.fill();
+  boundaryCtx.strokeStyle = '#fff';
+  boundaryCtx.lineCap = 'round';
+  boundaryCtx.lineJoin = 'round';
+  for (const stroke of strokes) {
+    if (stroke.points.length < 2) continue;
+    boundaryCtx.lineWidth = Math.max(3, stroke.size * ((scaleX + scaleY) / 2));
+    boundaryCtx.beginPath();
+    boundaryCtx.moveTo(
+      (stroke.points[0].x - display.left) * scaleX,
+      (stroke.points[0].y - display.top) * scaleY,
+    );
+    for (const point of stroke.points.slice(1)) {
+      boundaryCtx.lineTo(
+        (point.x - display.left) * scaleX,
+        (point.y - display.top) * scaleY,
+      );
+    }
+    boundaryCtx.stroke();
+  }
+
+  const width = boundary.width;
+  const height = boundary.height;
+  const boundaryData = boundaryCtx.getImageData(0, 0, width, height).data;
+  const blocked = new Uint8Array(width * height);
+  for (let index = 0; index < blocked.length; index += 1) {
+    blocked[index] = boundaryData[index * 4 + 3] > 0 ? 1 : 0;
+  }
+
+  const outside = new Uint8Array(width * height);
+  const queue = [];
+  function enqueue(x, y) {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const index = y * width + x;
+    if (outside[index] || blocked[index]) return;
+    outside[index] = 1;
+    queue.push(index);
+  }
+
+  for (let x = 0; x < width; x += 1) {
+    enqueue(x, 0);
+    enqueue(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    enqueue(0, y);
+    enqueue(width - 1, y);
+  }
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const index = queue[cursor];
+    const x = index % width;
+    const y = Math.floor(index / width);
+    enqueue(x + 1, y);
+    enqueue(x - 1, y);
+    enqueue(x, y + 1);
+    enqueue(x, y - 1);
+  }
+
+  const output = document.createElement('canvas');
+  output.width = width;
+  output.height = height;
+  const outputCtx = output.getContext('2d');
+  const maskImage = outputCtx.createImageData(width, height);
+  for (let index = 0; index < blocked.length; index += 1) {
+    const alpha = outside[index] ? 0 : 255;
+    const target = index * 4;
+    maskImage.data[target] = 255;
+    maskImage.data[target + 1] = 255;
+    maskImage.data[target + 2] = 255;
+    maskImage.data[target + 3] = alpha;
+  }
+  outputCtx.putImageData(maskImage, 0, 0);
 
   return output;
 }
@@ -452,6 +535,7 @@ function buildMaskCanvas() {
 async function saveImageAlignedMask() {
   try {
     savedMaskCanvas = buildMaskCanvas();
+    await storeMaskCanvas(savedMaskCanvas);
     cutButton.disabled = false;
     saveAlignedButton.textContent = 'Mask saved locally';
     setStatus('Mask saved in the browser. Ready to cut.');
