@@ -361,20 +361,36 @@ function decodeGif(buffer) {
   const frameCount = reader.numFrames();
   validateGif(new Array(frameCount), width, height);
   const frames = [];
+  const pixels = new Uint8ClampedArray(width * height * 4);
   for (let index = 0; index < frameCount; index += 1) {
-    const pixels = new Uint8ClampedArray(width * height * 4);
     const info = reader.frameInfo(index);
+    const restorePixels = info.disposal === 3 ? new Uint8ClampedArray(pixels) : null;
     reader.decodeAndBlitFrameRGBA(index, pixels);
     frames.push({
-      pixels,
+      pixels: new Uint8ClampedArray(pixels),
       delay: Math.max(20, (info.delay || 10) * 10),
     });
+    if (info.disposal === 2) {
+      clearFrameRect(pixels, width, info);
+    } else if (restorePixels) {
+      pixels.set(restorePixels);
+    }
   }
   return {
     width,
     height,
     frames,
   };
+}
+
+function clearFrameRect(pixels, width, frameInfo) {
+  const left = frameInfo.x;
+  const top = frameInfo.y;
+  const right = left + frameInfo.width;
+  const bottom = top + frameInfo.height;
+  for (let y = top; y < bottom; y += 1) {
+    pixels.fill(0, (y * width + left) * 4, (y * width + right) * 4);
+  }
 }
 
 function imageDataUrlFromPixels(width, height, pixels) {
