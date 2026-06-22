@@ -750,7 +750,7 @@ function frameCanvas(frame, mask, outline, width, height) {
         data[target + 2] = 255;
         data[target + 3] = 255;
       }
-      if (mask[sourceIndex]) {
+      if (mask[sourceIndex] && frame.pixels[source + 3] > 16) {
         data[target] = frame.pixels[source];
         data[target + 1] = frame.pixels[source + 1];
         data[target + 2] = frame.pixels[source + 2];
