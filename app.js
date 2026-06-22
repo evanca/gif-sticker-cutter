@@ -725,11 +725,15 @@ function frameCanvas(frame, mask, outline, width, height) {
   canvasFrame.width = width + PADDING * 2;
   canvasFrame.height = height + PADDING * 2;
   const frameCtx = canvasFrame.getContext('2d');
-  frameCtx.fillStyle = TRANSPARENT_KEY;
-  frameCtx.fillRect(0, 0, canvasFrame.width, canvasFrame.height);
 
   const imageData = frameCtx.createImageData(canvasFrame.width, canvasFrame.height);
   const data = imageData.data;
+  for (let index = 0; index < data.length; index += 4) {
+    data[index] = 255;
+    data[index + 1] = 0;
+    data[index + 2] = 255;
+    data[index + 3] = 255;
+  }
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const sourceIndex = y * width + x;
