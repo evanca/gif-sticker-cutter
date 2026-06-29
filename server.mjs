@@ -23,7 +23,7 @@ const limits = {
   fetchTimeoutMs: Number(process.env.FETCH_TIMEOUT_MS || 12000),
   processTimeoutMs: Number(process.env.PROCESS_TIMEOUT_MS || 45000),
   maxRedirects: Number(process.env.MAX_REDIRECTS || 3),
-  maxFrames: Number(process.env.MAX_GIF_FRAMES || 160),
+  maxFrames: Number(process.env.MAX_GIF_FRAMES || 400),
   maxDimension: Number(process.env.MAX_GIF_DIMENSION || 1200),
   maxPixels: Number(process.env.MAX_GIF_PIXELS || 1200 * 1200),
   cleanupMaxAgeMs: Number(process.env.EXPORT_MAX_AGE_MS || 60 * 60 * 1000),
@@ -420,6 +420,7 @@ const server = createServer(async (request, response) => {
     const file = await readFile(filePath);
     const headers = {
       'content-type': types[extname(filePath)] || 'application/octet-stream',
+      'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'content-security-policy': "default-src 'self'; img-src 'self' https: data: blob:; connect-src 'self' https: http://127.0.0.1:* http://localhost:*; script-src 'self'; worker-src 'self' blob:; style-src 'self'; base-uri 'none'; frame-ancestors 'none'",
     };

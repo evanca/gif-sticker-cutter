@@ -16,7 +16,7 @@ const resultLinks = document.querySelector('#resultLinks');
 const ctx = canvas.getContext('2d');
 
 const MAX_GIF_BYTES = 25 * 1024 * 1024;
-const MAX_FRAMES = 160;
+const MAX_FRAMES = 400;
 const MAX_DIMENSION = 1200;
 const MAX_PIXELS = 1200 * 1200;
 const OUTLINE_PX = 5;
@@ -28,7 +28,7 @@ const SMOOTH_THRESHOLD = 0.5;
 const PADDING = 24;
 const TRANSPARENT_KEY = '#ff00ff';
 const TRANSPARENT_HEX = 0xff00ff;
-const GIF_WORKER = './vendor/gif.worker.js';
+const GIF_WORKER = new URL('./vendor/gif.worker.js', document.baseURI).href;
 
 let strokes = [];
 let currentStroke = null;
@@ -279,15 +279,19 @@ function mediaCandidatesForUrl(url) {
     candidates.push(`https://i.giphy.com/media/${giphyId}/giphy.gif`);
   }
 
-  if (/(^|\.)tenor\.com$/i.test(parsed.hostname)) {
-    candidates.push(`https://tenor.com/oembed?url=${encodeURIComponent(url)}`);
-  }
-
-  if (/^media\d*\.tenor\.com$/i.test(parsed.hostname) && !parsed.pathname.toLowerCase().endsWith('.gif')) {
-    const gifPath = parsed.pathname
-      .replace(/AAAA(?:AN|AM|AP|Ad|AS|AC)\//, 'AAAAAC/')
+  if (/^media\d*\.tenor\.com$/i.test(parsed.hostname)) {
+    const canonicalGifPath = parsed.pathname
+      .replace(/^\/m\//, '/')
       .replace(/\.(png|jpg|jpeg|webp)$/i, '.gif');
-    candidates.push(`${parsed.origin}${gifPath}`);
+    candidates.push(`https://media.tenor.com${canonicalGifPath}`);
+    if (canonicalGifPath.includes('AAAAd/')) {
+      candidates.push(`https://media.tenor.com${canonicalGifPath.replace('AAAAd/', 'AAAAC/')}`);
+    }
+    if (canonicalGifPath.includes('AAAAC/')) {
+      candidates.push(`https://media.tenor.com${canonicalGifPath.replace('AAAAC/', 'AAAAd/')}`);
+    }
+  } else if (/(^|\.)tenor\.com$/i.test(parsed.hostname)) {
+    candidates.push(`https://tenor.com/oembed?url=${encodeURIComponent(url)}`);
   }
 
   if (/(^|\.)giphy\.com$/i.test(parsed.hostname)) {
