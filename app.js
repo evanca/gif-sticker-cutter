@@ -4,6 +4,10 @@ const loadButton = document.querySelector('#loadButton');
 const connectEdgesButton = document.querySelector('#connectEdgesButton');
 const clearButton = document.querySelector('#clearButton');
 const undoButton = document.querySelector('#undoButton');
+const markerButton = document.querySelector('#markerButton');
+const eraserButton = document.querySelector('#eraserButton');
+const roundedRectButton = document.querySelector('#roundedRectButton');
+const ovalButton = document.querySelector('#ovalButton');
 const saveAlignedButton = document.querySelector('#saveAlignedButton');
 const cutButton = document.querySelector('#cutButton');
 const sizeRange = document.querySelector('#sizeRange');
@@ -29,13 +33,20 @@ const PADDING = 24;
 const TRANSPARENT_KEY = '#ff00ff';
 const TRANSPARENT_HEX = 0xff00ff;
 const GIF_WORKER = new URL('./vendor/gif.worker.js', document.baseURI).href;
+const DRAW_TOOLS = new Map([
+  ['marker', markerButton],
+  ['eraser', eraserButton],
+  ['rounded-rect', roundedRectButton],
+  ['oval', ovalButton],
+]);
 
 let strokes = [];
-let currentStroke = null;
+let currentItem = null;
 let drawing = false;
 let loadingUrl = '';
 let savedMaskCanvas = null;
 let loadedGif = null;
+let activeTool = 'marker';
 
 function setStatus(message) {
   statusText.textContent = message;
@@ -68,42 +79,147 @@ function redraw() {
   ctx.clearRect(0, 0, rect.width, rect.height);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  for (const stroke of strokes) drawStroke(stroke);
-  if (currentStroke) drawStroke(currentStroke);
+  for (const item of strokes) drawItem(ctx, item);
+  if (currentItem) drawItem(ctx, currentItem);
+  ctx.globalCompositeOperation = 'source-over';
 }
 
-function drawStroke(stroke) {
+function selectTool(tool) {
+  activeTool = tool;
+  for (const [name, button] of DRAW_TOOLS) {
+    button.classList.toggle('active', name === tool);
+  }
+  canvas.classList.toggle('eraser-active', tool === 'eraser');
+}
+
+function drawItem(targetCtx, item, options = {}) {
+  if (item.type === 'stroke') {
+    drawStroke(targetCtx, item, options);
+  } else if (item.type === 'rounded-rect') {
+    drawRoundedRect(targetCtx, item, options);
+  } else if (item.type === 'oval') {
+    drawOval(targetCtx, item, options);
+  }
+}
+
+function applyDrawStyle(targetCtx, item, options = {}) {
+  const scale = options.scale || 1;
+  targetCtx.globalCompositeOperation = item.tool === 'eraser' ? 'destination-out' : 'source-over';
+  targetCtx.strokeStyle = options.color || '#ff2424';
+  targetCtx.lineWidth = Math.max(options.minLineWidth || 1, item.size * scale);
+  targetCtx.lineCap = 'round';
+  targetCtx.lineJoin = 'round';
+}
+
+function mappedPoint(point, options = {}) {
+  if (!options.mapPoint) return point;
+  return options.mapPoint(point);
+}
+
+function drawStroke(targetCtx, stroke, options = {}) {
   if (stroke.points.length < 2) return;
-  ctx.strokeStyle = '#ff2424';
-  ctx.lineWidth = stroke.size;
-  ctx.beginPath();
-  ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
-  for (const point of stroke.points.slice(1)) ctx.lineTo(point.x, point.y);
-  ctx.stroke();
+  applyDrawStyle(targetCtx, stroke, options);
+  const first = mappedPoint(stroke.points[0], options);
+  targetCtx.beginPath();
+  targetCtx.moveTo(first.x, first.y);
+  for (const point of stroke.points.slice(1)) {
+    const mapped = mappedPoint(point, options);
+    targetCtx.lineTo(mapped.x, mapped.y);
+  }
+  targetCtx.stroke();
+  targetCtx.globalCompositeOperation = 'source-over';
+}
+
+function normalizedRect(item, options = {}) {
+  const start = mappedPoint(item.start, options);
+  const end = mappedPoint(item.end, options);
+  const left = Math.min(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  return {
+    left,
+    top,
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
+  };
+}
+
+function drawRoundedRect(targetCtx, item, options = {}) {
+  const rect = normalizedRect(item, options);
+  if (rect.width < 2 || rect.height < 2) return;
+  applyDrawStyle(targetCtx, item, options);
+  const minSide = Math.min(rect.width, rect.height);
+  const radius = Math.min(minSide / 2, Math.max(minSide * 0.28, item.size * (options.scale || 1) * 2.5));
+  targetCtx.beginPath();
+  roundedRectPath(targetCtx, rect.left, rect.top, rect.width, rect.height, radius);
+  targetCtx.stroke();
+  targetCtx.globalCompositeOperation = 'source-over';
+}
+
+function roundedRectPath(targetCtx, left, top, width, height, radius) {
+  const right = left + width;
+  const bottom = top + height;
+  targetCtx.moveTo(left + radius, top);
+  targetCtx.lineTo(right - radius, top);
+  targetCtx.quadraticCurveTo(right, top, right, top + radius);
+  targetCtx.lineTo(right, bottom - radius);
+  targetCtx.quadraticCurveTo(right, bottom, right - radius, bottom);
+  targetCtx.lineTo(left + radius, bottom);
+  targetCtx.quadraticCurveTo(left, bottom, left, bottom - radius);
+  targetCtx.lineTo(left, top + radius);
+  targetCtx.quadraticCurveTo(left, top, left + radius, top);
+}
+
+function drawOval(targetCtx, item, options = {}) {
+  const rect = normalizedRect(item, options);
+  if (rect.width < 2 || rect.height < 2) return;
+  applyDrawStyle(targetCtx, item, options);
+  targetCtx.beginPath();
+  targetCtx.ellipse(
+    rect.left + rect.width / 2,
+    rect.top + rect.height / 2,
+    rect.width / 2,
+    rect.height / 2,
+    0,
+    0,
+    Math.PI * 2,
+  );
+  targetCtx.stroke();
+  targetCtx.globalCompositeOperation = 'source-over';
 }
 
 function startDrawing(event) {
   if (!loadedGif) return;
   drawing = true;
-  currentStroke = {
+  const point = pointFromEvent(event);
+  currentItem = {
+    type: activeTool === 'rounded-rect' || activeTool === 'oval' ? activeTool : 'stroke',
+    tool: activeTool === 'eraser' ? 'eraser' : 'marker',
     size: Number(sizeRange.value),
-    points: [pointFromEvent(event)],
+    points: [point],
+    start: point,
+    end: point,
   };
+  redraw();
   event.preventDefault();
 }
 
 function continueDrawing(event) {
-  if (!drawing || !currentStroke) return;
-  currentStroke.points.push(pointFromEvent(event));
+  if (!drawing || !currentItem) return;
+  const point = pointFromEvent(event);
+  if (currentItem.type === 'stroke') {
+    currentItem.points.push(point);
+  } else {
+    currentItem.end = point;
+  }
   redraw();
   event.preventDefault();
 }
 
 function stopDrawing() {
-  if (!drawing || !currentStroke) return;
+  if (!drawing || !currentItem) return;
   drawing = false;
-  strokes.push(currentStroke);
-  currentStroke = null;
+  if (isDrawableItem(currentItem)) strokes.push(currentItem);
+  currentItem = null;
   savedMaskCanvas = null;
   cutButton.disabled = true;
   resetResult();
@@ -123,16 +239,24 @@ function imageDisplayRect() {
 }
 
 function firstDrawnPoint() {
-  const stroke = strokes.find((item) => item.points.length > 0);
+  const stroke = strokes.find((item) => item.tool !== 'eraser' && item.points?.length > 0);
   return stroke ? stroke.points[0] : null;
 }
 
 function lastDrawnPoint() {
   for (let index = strokes.length - 1; index >= 0; index -= 1) {
     const stroke = strokes[index];
-    if (stroke.points.length > 0) return stroke.points[stroke.points.length - 1];
+    if (stroke.tool !== 'eraser' && stroke.points?.length > 0) return stroke.points[stroke.points.length - 1];
   }
   return null;
+}
+
+function isDrawableItem(item) {
+  if (item.type === 'stroke') return item.points.length > 1;
+  if (item.type === 'rounded-rect' || item.type === 'oval') {
+    return Math.abs(item.end.x - item.start.x) > 2 && Math.abs(item.end.y - item.start.y) > 2;
+  }
+  return false;
 }
 
 function nearestImageEdge(point, display) {
@@ -195,6 +319,8 @@ function connectEdges() {
   const lastEdge = nearestImageEdge(last, display);
   const edgePoints = edgePathBetween(lastEdge, firstEdge, display);
   strokes.push({
+    type: 'stroke',
+    tool: 'marker',
     size: Number(sizeRange.value),
     points: [last, lastEdge.point, ...edgePoints, firstEdge.point, first],
   });
@@ -424,7 +550,7 @@ async function loadDecodedGif(buffer, source) {
   gifImage.style.display = 'block';
   emptyState.style.display = 'none';
   strokes = [];
-  currentStroke = null;
+  currentItem = null;
   savedMaskCanvas = null;
   cutButton.disabled = true;
   saveAlignedButton.textContent = 'Save image-aligned mask';
@@ -619,7 +745,7 @@ function floodOutside(blocked, width, height) {
 
 function buildMaskCanvas() {
   if (!loadedGif) throw new Error('Load a GIF first');
-  if (!strokes.some((stroke) => stroke.points.length > 1)) throw new Error('Draw a closed outline first');
+  if (!strokes.some((item) => item.tool !== 'eraser' && isDrawableItem(item))) throw new Error('Draw a closed outline first');
 
   const display = imageDisplayRect();
   const boundary = document.createElement('canvas');
@@ -629,25 +755,20 @@ function buildMaskCanvas() {
   const scaleX = boundary.width / display.width;
   const scaleY = boundary.height / display.height;
 
-  boundaryCtx.strokeStyle = '#fff';
-  boundaryCtx.lineCap = 'round';
-  boundaryCtx.lineJoin = 'round';
-  for (const stroke of strokes) {
-    if (stroke.points.length < 2) continue;
-    boundaryCtx.lineWidth = Math.max(3, stroke.size * ((scaleX + scaleY) / 2));
-    boundaryCtx.beginPath();
-    boundaryCtx.moveTo(
-      (stroke.points[0].x - display.left) * scaleX,
-      (stroke.points[0].y - display.top) * scaleY,
-    );
-    for (const point of stroke.points.slice(1)) {
-      boundaryCtx.lineTo(
-        (point.x - display.left) * scaleX,
-        (point.y - display.top) * scaleY,
-      );
-    }
-    boundaryCtx.stroke();
+  const drawOptions = {
+    color: '#fff',
+    scale: (scaleX + scaleY) / 2,
+    minLineWidth: 3,
+    mapPoint: (point) => ({
+      x: (point.x - display.left) * scaleX,
+      y: (point.y - display.top) * scaleY,
+    }),
+  };
+  for (const item of strokes) {
+    if (!isDrawableItem(item)) continue;
+    drawItem(boundaryCtx, item, drawOptions);
   }
+  boundaryCtx.globalCompositeOperation = 'source-over';
 
   const width = boundary.width;
   const height = boundary.height;
@@ -877,17 +998,23 @@ async function cutGif() {
 
 function updateSummary() {
   const source = loadedGif ? `${loadedGif.frames.length} frame(s)` : 'No GIF loaded';
-  setStatus(`${source}. ${strokes.length} red outline stroke(s) drawn.`);
+  const drawn = strokes.filter((item) => item.tool !== 'eraser').length;
+  const erased = strokes.filter((item) => item.tool === 'eraser').length;
+  setStatus(`${source}. ${drawn} outline item(s), ${erased} eraser stroke(s).`);
 }
 
 loadButton.addEventListener('click', loadGif);
 gifFile.addEventListener('change', () => loadLocalFile(gifFile.files[0]));
+markerButton.addEventListener('click', () => selectTool('marker'));
+eraserButton.addEventListener('click', () => selectTool('eraser'));
+roundedRectButton.addEventListener('click', () => selectTool('rounded-rect'));
+ovalButton.addEventListener('click', () => selectTool('oval'));
 connectEdgesButton.addEventListener('click', connectEdges);
 cutButton.addEventListener('click', cutGif);
 saveAlignedButton.addEventListener('click', saveImageAlignedMask);
 clearButton.addEventListener('click', () => {
   strokes = [];
-  currentStroke = null;
+  currentItem = null;
   savedMaskCanvas = null;
   cutButton.disabled = true;
   resetResult();
@@ -907,6 +1034,7 @@ canvas.addEventListener('pointermove', continueDrawing);
 canvas.addEventListener('pointerup', stopDrawing);
 canvas.addEventListener('pointerleave', stopDrawing);
 window.addEventListener('resize', resizeCanvas);
+selectTool('marker');
 
 const params = new URLSearchParams(window.location.search);
 const initialUrl = params.get('url');
