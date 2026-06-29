@@ -861,10 +861,29 @@ function alphaMaskFromCanvas(maskCanvas) {
   return mask;
 }
 
-function frameCanvas(frame, mask, outline, width, height) {
+function contentBounds(mask, width, height) {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (mask[y * width + x]) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return { minX: 0, minY: 0, width, height };
+  return { minX, minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+function frameCanvas(frame, mask, outline, width, height, bounds) {
   const canvasFrame = document.createElement('canvas');
-  canvasFrame.width = width + PADDING * 2;
-  canvasFrame.height = height + PADDING * 2;
+  canvasFrame.width = bounds.width + PADDING * 2;
+  canvasFrame.height = bounds.height + PADDING * 2;
   const frameCtx = canvasFrame.getContext('2d');
 
   const imageData = frameCtx.createImageData(canvasFrame.width, canvasFrame.height);
@@ -875,19 +894,14 @@ function frameCanvas(frame, mask, outline, width, height) {
     data[index + 2] = 255;
     data[index + 3] = 255;
   }
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const sourceIndex = y * width + x;
+  for (let y = 0; y < bounds.height; y += 1) {
+    for (let x = 0; x < bounds.width; x += 1) {
+      const sourceIndex = (bounds.minY + y) * width + (bounds.minX + x);
       const source = sourceIndex * 4;
       const target = ((y + PADDING) * canvasFrame.width + x + PADDING) * 4;
       if (outline[sourceIndex]) {
         data[target] = 255;
         data[target + 1] = 255;
-        data[target + 2] = 255;
-        data[target + 3] = 255;
-      } else {
-        data[target] = 255;
-        data[target + 1] = 0;
         data[target + 2] = 255;
         data[target + 3] = 255;
       }
@@ -974,7 +988,8 @@ async function cutGif() {
   try {
     const mask = alphaMaskFromCanvas(savedMaskCanvas);
     const outline = dilateMask(mask, loadedGif.width, loadedGif.height, OUTLINE_PX);
-    const outputFrames = loadedGif.frames.map((frame) => frameCanvas(frame, mask, outline, loadedGif.width, loadedGif.height));
+    const bounds = contentBounds(outline, loadedGif.width, loadedGif.height);
+    const outputFrames = loadedGif.frames.map((frame) => frameCanvas(frame, mask, outline, loadedGif.width, loadedGif.height, bounds));
     const delays = loadedGif.frames.map((frame) => frame.delay);
     const gifBlob = await encodeGif(outputFrames, delays);
     const previewBlob = await canvasBlob(outputFrames[0], 'image/png');
